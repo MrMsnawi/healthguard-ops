@@ -3,21 +3,18 @@
 echo "🏥 Initializing HealthGuard Ops Project Structure..."
 
 # 1. Create Directory Structure
-mkdir -p services/alert/app/tests
-mkdir -p services/incident/src/tests
-mkdir -p services/oncall/app/tests
-mkdir -p services/web/src
+mkdir -p services/alert-ingestion/app/tests
+mkdir -p services/incident-management
+mkdir -p services/oncall-service/app/tests
+mkdir -p services/notification-service
+mkdir -p services/web-ui/src
 mkdir -p database
 mkdir -p monitoring/prometheus
-mkdir -p monitoring/grafana/dashboards
-mkdir -p monitoring/grafana/datasources
-mkdir -p monitoring/nginx
+mkdir -p monitoring/grafana-dashboards
 mkdir -p scripts
+mkdir -p init-scripts
 
 # 2. Create Placeholder Files if they don't exist
-touch services/alert/requirements.txt
-touch services/incident/package.json
-touch services/oncall/requirements.txt
 touch monitoring/prometheus/prometheus.yml
 touch monitoring/prometheus/alert.rules.yml
 
