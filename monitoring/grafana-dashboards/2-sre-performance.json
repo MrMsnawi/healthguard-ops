@@ -282,8 +282,8 @@
             "type": "prometheus",
             "uid": null
           },
-          "expr": "sum by (service) (rate(incidents_total[5m]))",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (severity) (rate(incidents_total[5m]))",
+          "legendFormat": "{{severity}}",
           "refId": "A"
         }
       ],

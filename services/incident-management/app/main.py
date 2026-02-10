@@ -333,7 +333,10 @@ def create_incident_from_alert(alert_data):
         conn.close()
         
         print(f"✅ Created incident: {incident_id} from alert {alert_data['alert_id']}")
-        
+
+        # Update Prometheus metrics
+        incidents_total.labels(severity=alert_data['severity']).inc()
+
         # Add to history
         add_to_history(incident_id, None, 'SYSTEM', 'CREATED', None, 'OPEN', f"Created from alert {alert_data['alert_id']}")
         
@@ -615,9 +618,12 @@ def acknowledge_incident(incident_id):
             'Employee acknowledged the incident'
         )
         
-        # Calculate response time
+        # Calculate response time and record MTTA in Prometheus
         calculate_time_metrics(incident_id)
-        
+        if incident['created_at']:
+            mtta_seconds = (acknowledged_at - incident['created_at']).total_seconds()
+            incident_mtta_seconds.observe(mtta_seconds)
+
         # Mark notification as read
         try:
             notification_response = requests.patch(
@@ -820,9 +826,12 @@ def resolve_incident(incident_id):
             resolution_notes
         )
         
-        # Calculate all time metrics
+        # Calculate all time metrics and record MTTR in Prometheus
         calculate_time_metrics(incident_id)
-        
+        if incident['created_at']:
+            mttr_seconds = (resolved_at - incident['created_at']).total_seconds()
+            incident_mttr_seconds.observe(mttr_seconds)
+
         # Get updated incident with metrics
         cur.execute("SELECT * FROM incidents WHERE incident_id = %s", (incident_id,))
         updated_incident = cur.fetchone()
