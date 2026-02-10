@@ -1,317 +1,244 @@
-# HealthGuard Ops - Incident Management Platform
+# HealthGuard Ops - Hospital Incident Management Platform
 
-A healthcare incident management system that monitors patient vital signs, detects emergencies, and routes them to on-call medical staff.
-
-## 🏥 Project Overview
-
-HealthGuard Ops is a complete incident management platform for healthcare environments. It:
-- **Ingests alerts** from vital sign monitoring systems
-- **Triages severity** (critical, high, medium, low)
-- **Creates incidents** and tracks lifecycle
-- **Notifies on-call staff** via SMS, email, Slack
-- **Tracks resolution time** and audit trail
-- **Provides real-time dashboards** for hospital staff
+Real-time incident management system for hospital operations with automated alerting, on-call scheduling, and SRE metrics monitoring.
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Docker & Docker Compose (v20.10+)
-- 8GB RAM minimum
-- 20GB free disk space
-
-### Get Running in 3 Steps
-
 ```bash
-# 1. Setup environment
-cp .env.example .env
+# 1. Start all services
+sudo docker-compose up -d
 
-# 2. Start all services
-docker-compose up -d
+# 2. Wait for initialization (30 seconds)
+sleep 30
 
-# 3. Verify services are healthy
-docker-compose ps
+# 3. Access the platform
+# Web UI: http://localhost:8080
+# Grafana: http://localhost:3001 (admin/admin)
+# Prometheus: http://localhost:9090
 ```
 
-**Access:**
-- Web UI: http://localhost:8080 🌐
-- Alert API: http://localhost:8001
-- Incident API: http://localhost:8002
-- On-Call API: http://localhost:8003
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3001 (admin/admin)
+**Login Credentials:**
+- Nurses: N01-N06 / password123
+- Emergency Doctors: D01-D04 / password123
+- Specialists: S01-S12 / password123
 
-## 🏗️ System Architecture
+## 📦 Architecture
 
-```
-Monitoring Systems
-    ↓
-Alert Ingestion (8001) ──→ PostgreSQL ──→ Incident Management (8002)
-                            └────────────→ On-Call Service (8003)
-                                              ↓
-                                        Send Notifications
-                                              ↓
-                                        Web UI (8080)
+### Services (Port)
+- **Web UI** (8080) - React frontend with real-time notifications
+- **Alert Ingestion** (8001) - Generates and processes patient alerts
+- **Incident Management** (8002) - Incident lifecycle and assignment
+- **On-Call Service** (8003) - Staff scheduling and authentication
+- **Notification Service** (8004) - WebSocket notifications
 
-Prometheus (9090) ←─ Metrics ─ from all services
-    ↓
-Grafana (3001) ←─ Dashboards & Alerts
-```
+### Infrastructure
+- **PostgreSQL** (5432) - Database with 24 employees, 8 patients, 33 alert types
+- **RabbitMQ** (5672, 15672) - Message queue for alert processing
+- **Prometheus** (9090) - Metrics collection from all services
+- **Grafana** (3001) - Live dashboards (Incidents, SRE Performance)
 
-### Services
+## 🛠️ Development
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| **Alert Ingestion** | 8001 | Receives alerts, triages severity |
-| **Incident Management** | 8002 | Creates incidents, tracks lifecycle |
-| **On-Call Service** | 8003 | Finds available staff, sends notifications |
-| **Web UI** | 8080 | Hospital dashboard & real-time updates |
-| **PostgreSQL** | 5432 | Persistent data storage |
-| **Prometheus** | 9090 | Metrics collection & alerting |
-| **Grafana** | 3001 | Monitoring dashboards |
+### Rebuild Services
+```bash
+# Rebuild all services
+sudo docker-compose build
 
-## 📁 Project Structure
-
-```
-healthguard-ops/
-├── services/                          # Microservices
-│   ├── alert-ingestion/              # Alert triage service (port 8001)
-│   ├── incident-management/          # Incident lifecycle (port 8002)
-│   ├── oncall-service/               # Staff notifications (port 8003)
-│   └── web-ui/                       # Dashboard & API gateway (port 8080)
-│
-├── monitoring/                        # Monitoring & observability
-│   ├── prometheus/                   # Metrics collection & alerting
-│   │   ├── prometheus.yml            # Service discovery config
-│   │   └── alert.rules.yml           # Alert rules
-│   └── grafana-dashboards/           # Custom dashboards
-│
-├── init-scripts/                      # Database initialization
-│   └── 01-init.sql                   # Schema & seed data
-│
-├── guides/                            # Documentation
-│   ├── QUICKSTART.md                 # 10-minute setup guide
-│   └── ARCHITECTURE.md               # System design docs
-│
-├── scripts/                           # Utility scripts
-├── docker-compose.yml                 # Service orchestration
-└── .env.example                       # Environment template
+# Rebuild specific service
+sudo docker-compose build web-ui
 ```
 
-## 🔧 Development
+### View Logs
+```bash
+# All services
+sudo docker-compose logs -f
+
+# Specific service
+sudo docker logs incident-management -f
+```
+
+### Database Access
+```bash
+# Connect to database
+sudo docker exec -it healthguard-postgres psql -U postgres -d incident_platform
+
+# Run SQL file
+sudo docker exec -i healthguard-postgres psql -U postgres -d incident_platform < shared/schema.sql
+```
+
+### Generate Test Alerts
+```bash
+# Manual alert
+curl -X POST http://localhost:8001/alerts/manual
+
+# Multiple alerts
+for i in {1..10}; do curl -X POST http://localhost:8001/alerts/manual; sleep 2; done
+```
+
+## 📊 Monitoring
+
+### Prometheus Metrics
+All services expose metrics at `/metrics`:
+- `alerts_received_total` - Total alerts by severity
+- `incidents_total` - Total incidents created
+- `incident_mtta_seconds` - Mean Time To Acknowledge
+- `incident_mttr_seconds` - Mean Time To Resolve
+
+### Grafana Dashboards
+1. **Live Incidents** - Real-time incident tracking and metrics
+2. **SRE Performance** - MTTA, MTTR, alert distribution
+
+Access: http://localhost:3001 (admin/admin)
+
+## 🧪 Testing
+
+### CI/CD Pipeline
+```bash
+# Run full pipeline (lint, test, build, deploy, verify)
+bash scripts/ci-cd-pipeline.sh
+```
+
+Pipeline stages:
+1. Code quality & testing
+2. Build container images
+3. Automated deployment
+4. Post-deployment verification
+5. Security scanning
+6. Integration testing
+7. Performance validation
 
 ### Health Checks
-
 ```bash
 # Check all services
 curl http://localhost:8001/health  # Alert Ingestion
 curl http://localhost:8002/health  # Incident Management
 curl http://localhost:8003/health  # On-Call Service
+curl http://localhost:8004/health  # Notification Service
 curl http://localhost:8080/health  # Web UI
 ```
 
-### View Logs
+## 📁 Project Structure
 
-```bash
-# All services
-docker-compose logs -f
-
-# Specific service
-docker-compose logs -f web-ui
-docker-compose logs -f alert-ingestion
+```
+healthguard-ops/
+├── services/
+│   ├── alert-ingestion/          # Alert generation & processing
+│   ├── incident-management/      # Incident lifecycle management
+│   ├── oncall-service/           # Staff scheduling & auth
+│   ├── notification-service/     # Real-time notifications
+│   └── web-ui/                   # React frontend
+├── monitoring/
+│   ├── grafana-dashboards/       # Dashboard JSON definitions
+│   └── prometheus/               # Prometheus config & rules
+├── init-scripts/                 # Database initialization SQL
+├── shared/                       # Modular SQL seed data
+├── scripts/                      # Utility scripts
+├── docker-compose.yml            # Service orchestration
+└── .env.example                  # Environment template
 ```
 
-### Rebuild Services
+## 🗄️ Database Schema
 
+### Core Tables
+- `employees` - 24 staff members (nurses, doctors, specialists)
+- `patients` - 8 mock patients with room assignments
+- `alert_type_definitions` - 33 hospital alert types
+- `alerts` - Generated patient alerts
+- `incidents` - Alert-triggered incidents
+- `incident_assignments` - Staff-incident assignments
+- `incident_history` - Audit trail
+- `notifications` - Employee notifications
+- `oncall_schedules` - Staff scheduling
+- `escalation_policies` - Escalation rules
+
+## 🔧 Troubleshooting
+
+### Services not starting
 ```bash
-# Rebuild all
-docker-compose build
+# Stop everything
+sudo docker-compose down
 
-# Rebuild specific service
-docker-compose build web-ui
+# Remove containers
+sudo docker rm -f $(sudo docker ps -aq)
 
-# Rebuild without cache
-docker-compose build --no-cache
+# Start fresh
+sudo docker-compose up -d
 ```
 
-### Stop Services
-
+### Database issues
 ```bash
-# Stop all services
-docker-compose down
-
-# Stop and remove volumes (clean slate)
-docker-compose down -v
+# Reset database
+sudo docker-compose down -v
+sudo docker-compose up -d
 ```
 
-## 📡 API Endpoints
+### Metrics not showing in Grafana
+```bash
+# 1. Check Prometheus targets
+curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
 
-### Alert Ingestion Service (Port 8001)
-- `POST /api/v1/alerts` - Create new alert from monitoring system
-- `POST /alerts/manual` - Manually trigger a test alert
+# 2. Generate test data
+for i in {1..10}; do curl -X POST http://localhost:8001/alerts/manual; sleep 1; done
+
+# 3. Verify metrics exist
+curl http://localhost:8001/metrics | grep alerts_received_total
+```
+
+## 🎯 Key Features
+
+✅ **Real-time Alerts** - Automatic patient alert generation from medical devices
+✅ **Smart Assignment** - Workload-based incident assignment to appropriate specialists
+✅ **On-Call Scheduling** - 24/7 staff rotation management
+✅ **Live Notifications** - WebSocket-based real-time updates
+✅ **SRE Metrics** - Prometheus monitoring with MTTA/MTTR tracking
+✅ **Incident Lifecycle** - OPEN → ASSIGNED → ACKNOWLEDGED → IN_PROGRESS → RESOLVED
+✅ **Role-Based Routing** - Cardiac alerts → Cardiologists, Respiratory → Pulmonologists
+✅ **Manual Claiming** - Staff can claim unassigned incidents
+✅ **Audit Trail** - Complete incident history tracking
+
+## 📄 API Endpoints
+
+### Alert Ingestion (8001)
+- `GET /health` - Health check
 - `GET /alerts` - List all alerts
-- `GET /health` - Health check endpoint
-- `GET /metrics` - Prometheus metrics endpoint
+- `POST /alerts/manual` - Generate test alert
+- `GET /metrics` - Prometheus metrics
 
-### Incident Management Service (Port 8002)
-- `GET /api/v1/incidents` - List all incidents with filters
-- `GET /api/v1/incidents/{id}` - Get specific incident details
-- `POST /api/v1/incidents/{id}/acknowledge` - Acknowledge an incident
-- `POST /api/v1/incidents/{id}/resolve` - Resolve an incident
-- `POST /api/v1/incidents/{id}/reopen` - Reopen a resolved incident
-- `GET /health` - Health check endpoint
-- `GET /metrics` - Prometheus metrics (incidents_total, MTTA, MTTR)
+### Incident Management (8002)
+- `GET /api/incidents` - List incidents
+- `GET /api/incidents/:id` - Get incident details
+- `PATCH /api/incidents/:id/acknowledge` - Acknowledge incident
+- `PATCH /api/incidents/:id/in-progress` - Start working on incident
+- `PATCH /api/incidents/:id/resolve` - Resolve incident
+- `PATCH /api/incidents/:id/claim` - Claim incident
+- `GET /metrics` - Prometheus metrics
 
-### On-Call Service (Port 8003)
+### On-Call Service (8003)
 - `POST /auth/login` - Employee login
 - `POST /auth/logout` - Employee logout
-- `GET /oncall/current?role={role}` - Get current on-call staff by role
-- `POST /oncall/assign` - Assign incident to employee
-- `GET /oncall/schedules` - List all employees and login status
-- `GET /health` - Health check endpoint
-- `GET /metrics` - Prometheus metrics (notifications_sent, escalations)
+- `GET /oncall/current` - Current on-call staff
+- `GET /metrics` - Prometheus metrics
 
-### Notification Service (Port 8004)
-- `GET /notifications/{employee_id}` - Get notifications for employee
-- `GET /notifications/{employee_id}?unread=true` - Get unread notifications only
-- `PATCH /notifications/{notification_id}/read` - Mark notification as read
-- `PATCH /notifications/employee/{employee_id}/mark-all-read` - Mark all as read
-- `PATCH /notifications/incident/{incident_id}/mark-read` - Mark incident notifications as read
-- `GET /health` - Health check endpoint
-- `GET /metrics` - Prometheus metrics (notifications_sent, notifications_delivered)
-- WebSocket: `ws://localhost:8004` - Real-time notification delivery
+### Notification Service (8004)
+- `GET /notifications/:employee_id` - Get employee notifications
+- `PATCH /notifications/:id/read` - Mark as read
+- WebSocket: `/socket.io/` - Real-time notifications
+- `GET /metrics` - Prometheus metrics
 
-### Web UI (Port 8080)
-- `GET /` - Hospital dashboard interface
-- `GET /health` - Health check endpoint
+## 🔐 Security
 
-## 🧪 Testing
+- No hardcoded credentials (environment variables)
+- CORS enabled for cross-origin requests
+- PostgreSQL with password authentication
+- RabbitMQ with default credentials (change in production)
+- Health checks on all services
 
-### API Examples
+## 📝 Documentation
 
-```bash
-# Send a test alert
-curl -X POST http://localhost:8001/api/v1/alerts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "patient_id": "PT-001",
-    "severity": "high",
-    "vital_signs": {
-      "heart_rate": 140,
-      "blood_pressure": "180/100"
-    }
-  }'
-
-# Get all incidents
-curl http://localhost:8002/api/v1/incidents
-
-# Get on-call staff
-curl http://localhost:8003/api/v1/staff
-```
-
-## 📊 Monitoring
-
-- **Prometheus**: Metrics collection at http://localhost:9090
-- **Grafana**: Dashboards at http://localhost:3001 (admin/admin)
-
-All services expose metrics at `/metrics` endpoint for Prometheus scraping.
-
-## 🔒 Configuration
-
-Key environment variables (see `.env.example`):
-
-```bash
-# Database
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=hackathon2026
-POSTGRES_DB=incident_platform
-
-# Service Ports
-ALERT_INGESTION_PORT=8001
-INCIDENT_MANAGEMENT_PORT=8002
-ONCALL_SERVICE_PORT=8003
-WEB_UI_PORT=8080
-
-# Monitoring
-PROMETHEUS_PORT=9090
-GRAFANA_PORT=3001
-```
-
-## 🐛 Troubleshooting
-
-### Services not starting?
-
-```bash
-# Check logs
-docker-compose logs
-
-# Check if ports are in use
-lsof -i :8080
-lsof -i :8001
-
-# Rebuild from scratch
-docker-compose down -v
-docker-compose build --no-cache
-docker-compose up -d
-```
-
-### Database issues?
-
-```bash
-# Check database logs
-docker-compose logs database
-
-# Verify init scripts ran
-docker-compose exec database psql -U postgres -d incident_platform -c "\dt alerts.*"
-```
-
-### Web UI not accessible?
-
-```bash
-# Check web-ui container status
-docker-compose ps web-ui
-
-# Check web-ui logs
-docker-compose logs web-ui
-
-# Verify health
-curl http://localhost:8080/health
-```
-
-## 📚 Documentation
-
-- **[CHEATSHEET.md](CHEATSHEET.md)** - Docker & DevOps command reference (START HERE if new to Docker!) 🎯
-- [QUICKSTART.md](guides/QUICKSTART.md) - 10-minute setup guide
-- [ARCHITECTURE.md](guides/ARCHITECTURE.md) - System design documentation
-
-## 🛠️ Developer Tools
-
-We provide a helpful interactive menu for common tasks:
-
-```bash
-# Run the developer helper script
-./scripts/dev-helper.sh
-```
-
-This gives you an easy menu to:
-- Start/stop/restart services
-- View logs and status
-- Check health endpoints
-- Access database
-- Open monitoring tools
-- And much more!
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License.
+- **[CHEATSHEET.md](CHEATSHEET.md)** - Docker & DevOps commands
+- **[INTEGRATION-SUMMARY.md](INTEGRATION-SUMMARY.md)** - Frontend integration notes
+- **[MERGE-ANALYSIS.md](MERGE-ANALYSIS.md)** - Code merge analysis
 
 ---
 
-**Built for healthcare incident management** 🏥
+**Built for Hackathon 2026** | Ready for production deployment with proper secrets management
