@@ -62,6 +62,24 @@ function Dashboard() {
         }
     };
 
+    const handleClaim = async (incidentId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setActionLoading(prev => ({ ...prev, [incidentId]: true }));
+        try {
+            await incidentService.claimIncident(incidentId, {
+                employee_id: user.employee_id,
+                employee_name: user.name
+            });
+            fetchData();
+        } catch (error) {
+            console.error('Failed to claim incident:', error);
+            alert('Failed to claim incident');
+        } finally {
+            setActionLoading(prev => ({ ...prev, [incidentId]: false }));
+        }
+    };
+
     // Calculate personal stats - only incidents assigned to me
     const myIncidents = incidents.filter(i => i.assigned_employee_id === user?.employee_id);
     
@@ -73,6 +91,15 @@ function Dashboard() {
 
     // My active incidents (not resolved)
     const myActiveIncidents = myIncidents.filter(i => i.status !== 'RESOLVED');
+
+    // Unassigned incidents that need attention (OPEN with no assignee)
+    const unassignedIncidents = incidents.filter(i =>
+        i.status === 'OPEN' && !i.assigned_employee_id
+    );
+
+    // Global stats
+    const totalOpenIncidents = incidents.filter(i => i.status !== 'RESOLVED').length;
+    const totalCriticalOpen = incidents.filter(i => i.severity === 'CRITICAL' && i.status !== 'RESOLVED').length;
 
     // Calculate my personal performance metrics
     const myResolvedIncidentsWithTime = myIncidents.filter(i => 
@@ -150,30 +177,30 @@ function Dashboard() {
                 </div>
             </div>
 
-            {/* My Performance Metrics */}
+            {/* Global + Personal Stats */}
             <div className="stats-grid" style={{ marginBottom: '24px' }}>
+                <div className="stat-card warning">
+                    <div className="stat-icon">🔔</div>
+                    <div className="stat-value">{unassignedIncidents.length}</div>
+                    <div className="stat-label">Unassigned</div>
+                </div>
+
+                <div className="stat-card">
+                    <div className="stat-icon">📊</div>
+                    <div className="stat-value">{totalOpenIncidents}</div>
+                    <div className="stat-label">Total Active</div>
+                </div>
+
                 <div className="stat-card success">
                     <div className="stat-icon">⏱️</div>
                     <div className="stat-value">{formatTime(myAvgResponseTime)}</div>
-                    <div className="stat-label">My Avg Response Time</div>
+                    <div className="stat-label">My Avg Response</div>
                 </div>
 
                 <div className="stat-card success">
                     <div className="stat-icon">🏁</div>
                     <div className="stat-value">{formatTime(myAvgResolutionTime)}</div>
-                    <div className="stat-label">My Avg Resolution Time</div>
-                </div>
-
-                <div className="stat-card">
-                    <div className="stat-icon">📊</div>
-                    <div className="stat-value">{myActiveIncidents.length}</div>
-                    <div className="stat-label">Active Cases</div>
-                </div>
-
-                <div className="stat-card">
-                    <div className="stat-icon">📈</div>
-                    <div className="stat-value">{myIncidents.length}</div>
-                    <div className="stat-label">Total Assigned</div>
+                    <div className="stat-label">My Avg Resolution</div>
                 </div>
             </div>
 
@@ -263,6 +290,66 @@ function Dashboard() {
                     </div>
                 )}
             </div>
+
+            {/* Unassigned Incidents - Need Attention */}
+            {unassignedIncidents.length > 0 && (
+                <div className="card" style={{ marginTop: '24px' }}>
+                    <div className="card-header">
+                        <h2 className="card-title">Unassigned Incidents ({unassignedIncidents.length})</h2>
+                        <Link to="/incidents" className="btn btn-secondary btn-sm">
+                            View All →
+                        </Link>
+                    </div>
+
+                    <div>
+                        {unassignedIncidents.slice(0, 5).map(incident => (
+                            <div
+                                key={incident.incident_id}
+                                className={`incident-card ${getSeverityClass(incident.severity)}`}
+                                style={{ marginBottom: '12px' }}
+                            >
+                                <Link
+                                    to={`/incidents/${incident.incident_id}`}
+                                    style={{ textDecoration: 'none', flex: 1 }}
+                                >
+                                    <div className="incident-header">
+                                        <div>
+                                            <span className="incident-id">{incident.incident_id}</span>
+                                            <span className={`badge badge-${incident.severity?.toLowerCase()}`} style={{ marginLeft: '12px' }}>
+                                                {incident.severity}
+                                            </span>
+                                        </div>
+                                        <span className={`status-badge ${getStatusClass(incident.status)}`}>
+                                            {incident.status?.replace('_', ' ')}
+                                        </span>
+                                    </div>
+                                    <div className="incident-meta">
+                                        <span className="incident-meta-item">
+                                            🏥 Patient: {incident.patient_id}
+                                        </span>
+                                        <span className="incident-meta-item">
+                                            🚪 Room: {incident.room || 'N/A'}
+                                        </span>
+                                        <span className="incident-meta-item">
+                                            ⏰ {new Date(incident.created_at).toLocaleTimeString()}
+                                        </span>
+                                    </div>
+                                </Link>
+
+                                <div style={{ display: 'flex', gap: '8px', marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color)' }}>
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        onClick={(e) => handleClaim(incident.incident_id, e)}
+                                        disabled={actionLoading[incident.incident_id]}
+                                    >
+                                        {actionLoading[incident.incident_id] ? '...' : '🤝 Claim'}
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

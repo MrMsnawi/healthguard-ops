@@ -3,6 +3,7 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 import pika
 import os
 import time
@@ -32,14 +33,36 @@ RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
 # Track connected employees (employee_id -> socket_id)
 connected_employees = {}
 
+# Connection pool (initialized lazily)
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool."""
+    global db_pool
+    if db_pool is None:
+        try:
+            db_pool = ThreadedConnectionPool(2, 10, DATABASE_URL)
+            print("✅ Database connection pool initialized")
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize connection pool: {e}")
+
 def get_db_connection():
-    """Get database connection with retry logic."""
+    """Get database connection from pool."""
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        if db_pool is None:
+            init_db_pool()
+        if db_pool:
+            return db_pool.getconn()
+        return None
     except Exception as e:
         print(f"❌ Error: Database connection failed: {e}")
         return None
+
+def return_db_connection(conn):
+    """Return a connection to the pool."""
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 def save_notification_to_db(notification_data):
     """Save notification to database for history."""
@@ -73,7 +96,7 @@ def save_notification_to_db(notification_data):
         
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Notification saved to database for employee {notification_data.get('employee_id')}")
         return True
@@ -211,7 +234,7 @@ def handle_mark_read(data):
             """, (datetime.now(), notification_id))
             conn.commit()
             cur.close()
-            conn.close()
+            return_db_connection(conn)
             emit('notification_marked_read', {'notification_id': notification_id})
     except Exception as e:
         print(f"❌ Error marking notification as read: {e}")
@@ -258,7 +281,7 @@ def get_employee_notifications(employee_id):
         
         notifications = cur.fetchall()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(notifications), 200
         
@@ -283,7 +306,7 @@ def mark_notification_read(notification_id):
         
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({'success': True}), 200
         
@@ -309,7 +332,7 @@ def mark_all_read(employee_id):
         updated_count = cur.rowcount
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({'success': True, 'updated_count': updated_count}), 200
         
@@ -338,7 +361,7 @@ def mark_incident_notification_read(incident_id):
         conn.commit()
         updated_count = cur.rowcount
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Marked {updated_count} notifications as read for incident {incident_id}")
         

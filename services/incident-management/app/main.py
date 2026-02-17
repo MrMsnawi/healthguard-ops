@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 import pika
 import os
 import time
@@ -27,6 +28,7 @@ incident_mttr_seconds = Histogram('incident_mttr_seconds', 'Mean Time To Resolve
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/hospital')
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
 ONCALL_SERVICE_URL = os.getenv('ONCALL_SERVICE_URL', 'http://localhost:8003')
+NOTIFICATION_SERVICE_URL = os.getenv('NOTIFICATION_SERVICE_URL', 'http://notification-service:8004')
 
 # Alert type to role mapping with priority order
 ALERT_ROLE_MAPPING = {
@@ -87,14 +89,36 @@ ALERT_ROLE_MAPPING = {
     'SUICIDE_RISK': ['PSYCHIATRIST', 'NURSE', 'EMERGENCY_DOCTOR']
 }
 
+# Connection pool (initialized lazily)
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool."""
+    global db_pool
+    if db_pool is None:
+        try:
+            db_pool = ThreadedConnectionPool(2, 10, DATABASE_URL)
+            print("✅ Database connection pool initialized")
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize connection pool: {e}")
+
 def get_db_connection():
-    """Get database connection with retry logic."""
+    """Get database connection from pool."""
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        if db_pool is None:
+            init_db_pool()
+        if db_pool:
+            return db_pool.getconn()
+        return None
     except Exception as e:
         print(f"❌ Error: Database connection failed: {e}")
         return None
+
+def return_db_connection(conn):
+    """Return a connection to the pool."""
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 def add_to_history(incident_id, employee_id, employee_name, action, previous_status=None, new_status=None, note=None):
     """Add entry to incident history for audit trail."""
@@ -111,7 +135,7 @@ def add_to_history(incident_id, employee_id, employee_name, action, previous_sta
         
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         return True
     except Exception as e:
         print(f"❌ Error adding to history: {e}")
@@ -158,7 +182,7 @@ def calculate_time_metrics(incident_id):
         
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
     except Exception as e:
         print(f"❌ Error calculating time metrics: {e}")
@@ -214,93 +238,114 @@ def get_staff_workload(employee_id):
         in_progress = cur.fetchone()[0]
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return {'total': total_active, 'in_progress': in_progress}
     except Exception as e:
         print(f"❌ Error getting workload: {e}")
         return {'total': 999, 'in_progress': 999}
 
+def assign_incident_to_staff(incident_id, staff, alert_type, role, workload):
+    """Assign an incident to a specific staff member."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE incidents
+        SET assigned_to = %s, assigned_employee_id = %s, assigned_at = %s, status = 'ASSIGNED'
+        WHERE incident_id = %s
+    """, (staff['name'], staff['employee_id'], datetime.now(), incident_id))
+
+    cur.execute("""
+        INSERT INTO incident_assignments (incident_id, employee_id, employee_name, is_primary)
+        VALUES (%s, %s, %s, TRUE)
+        ON CONFLICT (incident_id, employee_id) DO NOTHING
+    """, (incident_id, staff['employee_id'], staff['name']))
+
+    conn.commit()
+    cur.close()
+    return_db_connection(conn)
+
+    print(f"✅ Assigned {incident_id} to {staff['name']} ({role}) [Workload: {workload['in_progress']} in-progress, {workload['total']} total]")
+
+    add_to_history(incident_id, staff['employee_id'], staff['name'], 'ASSIGNED', 'OPEN', 'ASSIGNED',
+                   f"Auto-assigned to {role} (least busy: {workload['total']} active incidents)")
+
+    publish_notification({
+        'type': 'INCIDENT_ASSIGNED',
+        'employee_id': staff['employee_id'],
+        'employee_name': staff['name'],
+        'employee_email': staff.get('email', ''),
+        'employee_phone': staff.get('phone', ''),
+        'incident_id': incident_id,
+        'alert_type': alert_type,
+        'severity': 'MEDIUM',
+        'patient_id': 'Unknown',
+        'title': 'New Incident Assigned',
+        'message': f'{alert_type} incident assigned to you.',
+        'data': {'incident_id': incident_id, 'alert_type': alert_type, 'role': role},
+        'timestamp': datetime.now().isoformat()
+    })
+    return True
+
+def pick_least_busy_staff(available_staff, role_label):
+    """Pick the staff member with the least workload from a list."""
+    staff_with_workload = []
+    print(f"📊 Checking workload for {len(available_staff)} {role_label} staff members...")
+    for staff in available_staff:
+        workload = get_staff_workload(staff['employee_id'])
+        staff_with_workload.append({'staff': staff, 'workload': workload})
+        print(f"   {staff['name']} (ID:{staff['employee_id']}): {workload['in_progress']} in-progress, {workload['total']} total")
+
+    staff_with_workload.sort(key=lambda x: (x['workload']['in_progress'], x['workload']['total']))
+    selected = staff_with_workload[0]
+    print(f"   → Selected: {selected['staff']['name']} (least busy)")
+    return selected['staff'], selected['workload']
+
 def auto_assign_incident(incident_id, alert_type):
     """Assign incident using smart load-balancing strategy based on current workload."""
     try:
         role_priorities = ALERT_ROLE_MAPPING.get(alert_type, ['NURSE'])
-        
+
+        # Step 1: Try to find logged-in staff for each specific role
         for role in role_priorities:
+            try:
+                response = requests.get(
+                    f"{ONCALL_SERVICE_URL}/oncall/current",
+                    params={'role': role},
+                    timeout=5
+                )
+
+                if response.status_code == 200:
+                    available_staff = response.json()
+                    if available_staff and len(available_staff) > 0:
+                        staff, workload = pick_least_busy_staff(available_staff, role)
+                        return assign_incident_to_staff(incident_id, staff, alert_type, role, workload)
+            except Exception as e:
+                print(f"⚠️  Error checking role {role}: {e}")
+                continue
+
+        # Step 2: Fallback - try ANY logged-in employee regardless of role
+        print(f"⚠️  No specific role match for {alert_type}, trying any logged-in employee...")
+        try:
             response = requests.get(
-                f"{ONCALL_SERVICE_URL}/oncall/current",
-                params={'role': role},
+                f"{ONCALL_SERVICE_URL}/oncall/schedules",
                 timeout=5
             )
-            
             if response.status_code == 200:
-                available_staff = response.json()
-                if available_staff and len(available_staff) > 0:
-                    # Get workload for each staff member (all staff with this role, regardless of tier)
-                    staff_with_workload = []
-                    print(f"📊 Checking workload for {len(available_staff)} {role} staff members...")
-                    for staff in available_staff:
-                        workload = get_staff_workload(staff['employee_id'])
-                        staff_with_workload.append({'staff': staff, 'workload': workload})
-                        print(f"   {staff['name']} (ID:{staff['employee_id']}): {workload['in_progress']} in-progress, {workload['total']} total")
-                    
-                    # Sort by workload: fewest in_progress, then fewest total
-                    staff_with_workload.sort(key=lambda x: (x['workload']['in_progress'], x['workload']['total']))
-                    print(f"   → Selected: {staff_with_workload[0]['staff']['name']} (least busy)")
-                    
-                    selected = staff_with_workload[0]
-                    staff = selected['staff']
-                    workload = selected['workload']
-                    
-                    conn = get_db_connection()
-                    if not conn:
-                        return False
-                    cur = conn.cursor()
-                    
-                    # Update incident
-                    cur.execute("""
-                        UPDATE incidents 
-                        SET assigned_to = %s, assigned_employee_id = %s, assigned_at = %s, status = 'ASSIGNED'
-                        WHERE incident_id = %s
-                    """, (staff['name'], staff['employee_id'], datetime.now(), incident_id))
-                    
-                    # Store in assignments table
-                    cur.execute("""
-                        INSERT INTO incident_assignments (incident_id, employee_id, employee_name, is_primary)
-                        VALUES (%s, %s, %s, TRUE)
-                        ON CONFLICT (incident_id, employee_id) DO NOTHING
-                    """, (incident_id, staff['employee_id'], staff['name']))
-                    
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    
-                    print(f"✅ Assigned {incident_id} to {staff['name']} ({role}) [Workload: {workload['in_progress']} in-progress, {workload['total']} total]")
-                    
-                    add_to_history(incident_id, staff['employee_id'], staff['name'], 'ASSIGNED', 'OPEN', 'ASSIGNED',
-                                   f"Auto-assigned (least busy: {workload['total']} active incidents)")
-                    
-                    # Send notification
-                    publish_notification({
-                        'type': 'INCIDENT_ASSIGNED',
-                        'employee_id': staff['employee_id'],
-                        'employee_name': staff['name'],
-                        'employee_email': staff.get('email', ''),
-                        'employee_phone': staff.get('phone', ''),
-                        'incident_id': incident_id,
-                        'alert_type': alert_type,
-                        'severity': 'MEDIUM',
-                        'patient_id': 'Unknown',
-                        'title': 'New Incident Assigned',
-                        'message': f'{alert_type} incident assigned to you.',
-                        'data': {'incident_id': incident_id, 'alert_type': alert_type, 'role': role},
-                        'timestamp': datetime.now().isoformat()
-                    })
-                    return True
-        
-        print(f"⚠️  No available staff for {incident_id} (alert: {alert_type}, tried: {role_priorities})")
+                all_employees = response.json()
+                logged_in = [e for e in all_employees if e.get('is_logged_in')]
+                if logged_in:
+                    staff, workload = pick_least_busy_staff(logged_in, 'ANY_ROLE')
+                    return assign_incident_to_staff(incident_id, staff, alert_type, staff.get('role', 'UNKNOWN'), workload)
+        except Exception as e:
+            print(f"⚠️  Error in fallback assignment: {e}")
+
+        print(f"⚠️  No available staff for {incident_id} (alert: {alert_type}, tried: {role_priorities} + fallback)")
         return False
-        
+
     except Exception as e:
         print(f"❌ Error: Auto-assignment failed for incident {incident_id}: {e}")
         return False
@@ -330,7 +375,7 @@ def create_incident_from_alert(alert_data):
         ))
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Created incident: {incident_id} from alert {alert_data['alert_id']}")
 
@@ -414,24 +459,100 @@ def get_incidents():
     """Get all incidents with optional status filter."""
     try:
         status_filter = request.args.get('status')
-        
+
         conn = get_db_connection()
         if not conn:
             return jsonify({'error': 'Database connection failed'}), 500
-        
+
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
+
         if status_filter:
             cur.execute("SELECT * FROM incidents WHERE status = %s ORDER BY created_at DESC", (status_filter,))
         else:
             cur.execute("SELECT * FROM incidents ORDER BY created_at DESC")
-        
+
         incidents = cur.fetchall()
         cur.close()
-        conn.close()
-        
+        return_db_connection(conn)
+
         return jsonify(incidents), 200
-        
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/incidents/metrics', methods=['GET'])
+def get_metrics():
+    """Get performance metrics."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Database connection failed'}), 500
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Average times
+        cur.execute("""
+            SELECT
+                AVG(response_time_seconds) as avg_response_time,
+                AVG(resolution_time_seconds) as avg_resolution_time,
+                AVG(total_time_seconds) as avg_total_time
+            FROM incidents
+            WHERE status = 'RESOLVED'
+        """)
+        times = cur.fetchone()
+
+        # Count by severity
+        cur.execute("""
+            SELECT severity, COUNT(*) as count
+            FROM incidents
+            GROUP BY severity
+        """)
+        severity_counts = {row['severity']: row['count'] for row in cur.fetchall()}
+
+        # Count by status
+        cur.execute("""
+            SELECT status, COUNT(*) as count
+            FROM incidents
+            GROUP BY status
+        """)
+        status_counts = {row['status']: row['count'] for row in cur.fetchall()}
+
+        # Employee performance
+        cur.execute("""
+            SELECT
+                e.name,
+                e.role,
+                COUNT(i.incident_id) as incidents_handled,
+                AVG(i.response_time_seconds) as avg_response_seconds,
+                AVG(i.resolution_time_seconds) as avg_resolution_seconds
+            FROM incidents i
+            JOIN employees e ON i.resolved_by_employee_id = e.employee_id
+            WHERE i.status = 'RESOLVED'
+            GROUP BY e.employee_id, e.name, e.role
+            ORDER BY avg_response_seconds ASC
+        """)
+        employee_performance = cur.fetchall()
+
+        cur.close()
+        return_db_connection(conn)
+
+        metrics = {
+            'average_times': {
+                'response_time_seconds': float(times['avg_response_time']) if times['avg_response_time'] else 0,
+                'response_time_minutes': float(times['avg_response_time']) / 60 if times['avg_response_time'] else 0,
+                'resolution_time_seconds': float(times['avg_resolution_time']) if times['avg_resolution_time'] else 0,
+                'resolution_time_minutes': float(times['avg_resolution_time']) / 60 if times['avg_resolution_time'] else 0,
+                'total_time_seconds': float(times['avg_total_time']) if times['avg_total_time'] else 0,
+                'total_time_minutes': float(times['avg_total_time']) / 60 if times['avg_total_time'] else 0
+            },
+            'severity_counts': severity_counts,
+            'status_counts': status_counts,
+            'employee_performance': employee_performance
+        }
+
+        return jsonify(metrics), 200
+
     except Exception as e:
         print(f"❌ Error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -462,7 +583,7 @@ def get_incident(incident_id):
         history = cur.fetchall()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'incident': incident,
@@ -562,7 +683,7 @@ def claim_incident(incident_id):
         updated_incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(updated_incident), 200
         
@@ -627,7 +748,7 @@ def acknowledge_incident(incident_id):
         # Mark notification as read
         try:
             notification_response = requests.patch(
-                f"http://localhost:8004/notifications/incident/{incident_id}/mark-read",
+                f"{NOTIFICATION_SERVICE_URL}/notifications/incident/{incident_id}/mark-read",
                 json={'employee_id': employee_id},
                 timeout=3
             )
@@ -641,7 +762,7 @@ def acknowledge_incident(incident_id):
         updated_incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(updated_incident), 200
         
@@ -703,7 +824,7 @@ def start_incident(incident_id):
         updated_incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(updated_incident), 200
         
@@ -763,7 +884,7 @@ def add_note(incident_id):
         updated_incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(updated_incident), 200
         
@@ -837,85 +958,9 @@ def resolve_incident(incident_id):
         updated_incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(updated_incident), 200
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/incidents/metrics', methods=['GET'])
-def get_metrics():
-    """Get performance metrics."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({'error': 'Database connection failed'}), 500
-        
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Average times
-        cur.execute("""
-            SELECT 
-                AVG(response_time_seconds) as avg_response_time,
-                AVG(resolution_time_seconds) as avg_resolution_time,
-                AVG(total_time_seconds) as avg_total_time
-            FROM incidents 
-            WHERE status = 'RESOLVED'
-        """)
-        times = cur.fetchone()
-        
-        # Count by severity
-        cur.execute("""
-            SELECT severity, COUNT(*) as count
-            FROM incidents
-            GROUP BY severity
-        """)
-        severity_counts = {row['severity']: row['count'] for row in cur.fetchall()}
-        
-        # Count by status
-        cur.execute("""
-            SELECT status, COUNT(*) as count
-            FROM incidents
-            GROUP BY status
-        """)
-        status_counts = {row['status']: row['count'] for row in cur.fetchall()}
-        
-        # Employee performance
-        cur.execute("""
-            SELECT 
-                e.name,
-                e.role,
-                COUNT(i.incident_id) as incidents_handled,
-                AVG(i.response_time_seconds) as avg_response_seconds,
-                AVG(i.resolution_time_seconds) as avg_resolution_seconds
-            FROM incidents i
-            JOIN employees e ON i.resolved_by_employee_id = e.employee_id
-            WHERE i.status = 'RESOLVED'
-            GROUP BY e.employee_id, e.name, e.role
-            ORDER BY avg_response_seconds ASC
-        """)
-        employee_performance = cur.fetchall()
-        
-        cur.close()
-        conn.close()
-        
-        metrics = {
-            'average_times': {
-                'response_time_seconds': float(times['avg_response_time']) if times['avg_response_time'] else 0,
-                'response_time_minutes': float(times['avg_response_time']) / 60 if times['avg_response_time'] else 0,
-                'resolution_time_seconds': float(times['avg_resolution_time']) if times['avg_resolution_time'] else 0,
-                'resolution_time_minutes': float(times['avg_resolution_time']) / 60 if times['avg_resolution_time'] else 0,
-                'total_time_seconds': float(times['avg_total_time']) if times['avg_total_time'] else 0,
-                'total_time_minutes': float(times['avg_total_time']) / 60 if times['avg_total_time'] else 0
-            },
-            'severity_counts': severity_counts,
-            'status_counts': status_counts,
-            'employee_performance': employee_performance
-        }
-        
-        return jsonify(metrics), 200
         
     except Exception as e:
         print(f"❌ Error: {e}")

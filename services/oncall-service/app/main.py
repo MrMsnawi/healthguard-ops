@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -20,14 +21,36 @@ escalations_total = Counter('escalations_total', 'Total escalations')
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/hospital')
 print(f"🔍 Using DATABASE_URL: {DATABASE_URL}")
 
+# Connection pool (initialized lazily)
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool."""
+    global db_pool
+    if db_pool is None:
+        try:
+            db_pool = ThreadedConnectionPool(2, 10, DATABASE_URL)
+            print("✅ Database connection pool initialized")
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize connection pool: {e}")
+
 def get_db_connection():
-    """Get database connection with retry logic."""
+    """Get database connection from pool."""
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        if db_pool is None:
+            init_db_pool()
+        if db_pool:
+            return db_pool.getconn()
+        return None
     except Exception as e:
         print(f"❌ Error: Database connection failed: {e}")
         return None
+
+def return_db_connection(conn):
+    """Return a connection to the pool."""
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 def seed_oncall_schedules():
     """Seed initial on-call schedule data on startup by linking employees to shifts."""
@@ -45,7 +68,7 @@ def seed_oncall_schedules():
         if count > 0:
             print("✅ On-call schedules already seeded")
             cur.close()
-            conn.close()
+            return_db_connection(conn)
             return True
         
         # Get current date at midnight
@@ -62,7 +85,7 @@ def seed_oncall_schedules():
         if not employees:
             print("⚠️  Warning: No employees found in database. Run employees.sql first!")
             cur.close()
-            conn.close()
+            return_db_connection(conn)
             return False
         
         # Create schedules for all employees using their defined shift times
@@ -84,7 +107,7 @@ def seed_oncall_schedules():
         
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Seeded {len(employees)} on-call schedules from employees table")
         return True
@@ -132,7 +155,7 @@ def employee_login():
         
         if not employee:
             cur.close()
-            conn.close()
+            return_db_connection(conn)
             return jsonify({'error': 'Invalid login or password'}), 401
         
         # Update login status
@@ -144,7 +167,7 @@ def employee_login():
         conn.commit()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Employee logged in: {employee['name']} ({login})")
         return jsonify({
@@ -182,7 +205,7 @@ def employee_logout():
         conn.commit()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"✅ Employee logged out: {login}")
         return jsonify({'message': 'Logout successful'}), 200
@@ -216,7 +239,7 @@ def get_current_oncall():
         
         employees = cur.fetchall()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         if not employees:
             return jsonify({'error': f'No one currently logged in for role {role}'}), 404
@@ -256,7 +279,7 @@ def assign_oncall():
         
         if not employee:
             cur.close()
-            conn.close()
+            return_db_connection(conn)
             return jsonify({'error': f'Employee with ID {employee_id} not found'}), 404
         
         person_name = employee['name']
@@ -277,7 +300,7 @@ def assign_oncall():
         incident = cur.fetchone()
         
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         if not incident:
             return jsonify({'error': 'Incident not found'}), 404
@@ -309,7 +332,7 @@ def get_schedules():
         """)
         employees = cur.fetchall()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(employees), 200
         

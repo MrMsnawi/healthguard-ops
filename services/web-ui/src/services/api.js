@@ -1,11 +1,12 @@
 import axios from 'axios';
 
 // API Base URLs for microservices
+// Uses relative paths so requests route through nginx proxy (or Vite dev proxy)
 const API_URLS = {
-  alert: 'http://localhost:8001',
-  incident: 'http://localhost:8002',
-  oncall: 'http://localhost:8003',
-  notification: 'http://localhost:8004'
+  alert: '',
+  incident: '',
+  oncall: '',
+  notification: ''
 };
 
 // Create axios instances for each service

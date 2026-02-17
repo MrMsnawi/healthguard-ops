@@ -8,8 +8,8 @@ const oncallService = {
     },
 
     // Employee logout
-    logout: async (employeeId) => {
-        const response = await oncallApi.post('/auth/logout', { employee_id: employeeId });
+    logout: async (login) => {
+        const response = await oncallApi.post('/auth/logout', { login });
         return response.data;
     },
 

@@ -15,13 +15,15 @@ const notificationService = {
 
     // Mark all notifications as read for an employee
     markAllAsRead: async (employeeId) => {
-        const response = await notificationApi.patch(`/notifications/${employeeId}/read-all`);
+        const response = await notificationApi.patch(`/notifications/employee/${employeeId}/mark-all-read`);
         return response.data;
     },
 
     // Mark all notifications for a specific incident as read
-    markIncidentNotificationsRead: async (incidentId) => {
-        const response = await notificationApi.patch(`/incidents/${incidentId}/notifications/read`);
+    markIncidentNotificationsRead: async (incidentId, employeeId) => {
+        const response = await notificationApi.patch(`/notifications/incident/${incidentId}/mark-read`, {
+            employee_id: employeeId
+        });
         return response.data;
     },
 

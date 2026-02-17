@@ -85,7 +85,9 @@ CREATE TABLE IF NOT EXISTS incidents (
     incident_id VARCHAR(50) PRIMARY KEY,
     alert_id VARCHAR(50) REFERENCES alerts(alert_id),
     patient_id VARCHAR(20),
-    
+    room VARCHAR(10),
+    alert_type VARCHAR(50),
+
     -- Status workflow: OPEN -> ASSIGNED -> ACKNOWLEDGED -> IN_PROGRESS -> RESOLVED
     status VARCHAR(20) DEFAULT 'OPEN',
     severity VARCHAR(20),

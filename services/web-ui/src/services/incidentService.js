@@ -40,7 +40,7 @@ const incidentService = {
 
     // Add a progress note
     addNote: async (incidentId, employeeId, employeeName, note) => {
-        const response = await incidentApi.post(`/incidents/${incidentId}/note`, {
+        const response = await incidentApi.post(`/incidents/${incidentId}/notes`, {
             employee_id: employeeId,
             employee_name: employeeName,
             note

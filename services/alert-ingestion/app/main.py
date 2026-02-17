@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 import pika
 import os
 import time
@@ -25,16 +26,36 @@ alerts_correlated = Counter('alerts_correlated_total', 'Total alerts correlated 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/hospital')
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
 
-# No hardcoded data - all retrieved from database!
+# Connection pool (initialized lazily)
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool."""
+    global db_pool
+    if db_pool is None:
+        try:
+            db_pool = ThreadedConnectionPool(2, 10, DATABASE_URL)
+            print("✅ Database connection pool initialized")
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize connection pool: {e}")
 
 def get_db_connection():
-    """Get database connection with retry logic."""
+    """Get database connection from pool."""
+    global db_pool
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        if db_pool is None:
+            init_db_pool()
+        if db_pool:
+            return db_pool.getconn()
+        return None
     except Exception as e:
         print(f"❌ Error: Database connection failed: {e}")
         return None
+
+def return_db_connection(conn):
+    """Return a connection to the pool."""
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 def get_random_patient():
     """Get a random admitted patient from database."""
@@ -53,7 +74,7 @@ def get_random_patient():
         """)
         patient = cur.fetchone()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         return patient
     except Exception as e:
         print(f"❌ Error: Failed to fetch patient: {e}")
@@ -75,7 +96,7 @@ def get_random_alert_type():
         """)
         alert_config = cur.fetchone()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         return alert_config
     except Exception as e:
         print(f"❌ Error: Failed to fetch alert type: {e}")
@@ -155,7 +176,7 @@ def generate_alert():
         """, (alert_id, patient_id, room, alert_type, severity, value, created_at))
         conn.commit()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         alert_data = {
             'alert_id': alert_id,
@@ -222,7 +243,7 @@ def get_alerts():
         cur.execute("SELECT * FROM alerts ORDER BY created_at DESC")
         alerts = cur.fetchall()
         cur.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify(alerts), 200
         
